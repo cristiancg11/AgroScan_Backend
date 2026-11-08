@@ -12,11 +12,25 @@ from app.config import settings
 
 logger = logging.getLogger("agroscan.db")
 
+
+def get_clean_database_url(raw_url: str) -> str:
+    """
+    Sanitizes database URL for SQLAlchemy and psycopg.
+    Strips surrounding quotes and removes '?pgbouncer=true' (Prisma-specific option not supported by libpq).
+    """
+    cleaned = raw_url.strip().strip('"').strip("'")
+    if "?pgbouncer=true" in cleaned:
+        cleaned = cleaned.replace("?pgbouncer=true", "")
+    elif "&pgbouncer=true" in cleaned:
+        cleaned = cleaned.replace("&pgbouncer=true", "")
+    return cleaned
+
+
 # Supabase PgBouncer pooler connection engine
 # pool_pre_ping checks connection liveness before checking out from pool
 # pool_recycle handles connection timeouts in cloud poolers
 engine = create_engine(
-    settings.database_url,
+    get_clean_database_url(settings.database_url),
     pool_pre_ping=True,
     pool_recycle=300,
 )

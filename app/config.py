@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     )
 
     gemini_api_key: str = ""
-    database_url: str = "postgresql://postgres.dthmcpvbbhqvbywpjpre:3GVS?rqGD%zBGy@@aws-0-us-east-2.pooler.supabase.com:6543/postgres?pgbouncer=true"
+    database_url: str = "postgresql://postgres.dthmcpvbbhqvbywpjpre:AgroScan2026Pasto@aws-0-us-east-2.pooler.supabase.com:6543/postgres?pgbouncer=true"
     host: str = "0.0.0.0"
     port: int = 8000
     cors_origins: str = "http://localhost:5173"
