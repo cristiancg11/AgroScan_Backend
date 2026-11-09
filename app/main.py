@@ -82,24 +82,24 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Configure CORS Middleware for web frontend integration (Vite dev server on 5173 / 5180)
+# Configure CORS Middleware for web frontend integration (Vite dev server on 5180 / 5173)
+# Explicitly lists dev origins without wildcards to fully support browser credentials (cookies / Auth headers)
 origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
     "http://localhost:5180",
     "http://127.0.0.1:5180",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
 for custom_origin in settings.cors_origins_list:
-    if custom_origin and custom_origin not in origins:
+    if custom_origin and custom_origin != "*" and custom_origin not in origins:
         origins.append(custom_origin)
 
-logger.info("Configuring CORS middleware with origins: %s", origins)
+logger.info("Configuring CORS middleware with explicit origins: %s", origins)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
