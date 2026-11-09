@@ -8,6 +8,7 @@ import logging
 import traceback
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +23,7 @@ from app.schemas import (
     ChatMessage,
     ChatFollowUpRequest,
     ChatFollowUpResponse,
+    ClearDiagnosticResponse,
     CropType,
     DiagnosticResponse,
     DosageCalculationRequest,
@@ -58,6 +60,16 @@ async def lifespan(app: FastAPI):
                 text(
                     "ALTER TABLE diagnostics ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) "
                     "REFERENCES users(id) ON DELETE SET NULL;"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE diagnostics ADD COLUMN IF NOT EXISTS part_analyzed VARCHAR(64) DEFAULT 'Hoja / Follaje';"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE diagnostics ADD COLUMN IF NOT EXISTS dosage_backpack_20l VARCHAR(255) DEFAULT '';"
                 )
             )
             # Explicitly verify and create dosage_assessments table
@@ -347,18 +359,73 @@ def get_current_user_profile(
 # PHYTOSANITARY DIAGNOSTIC ENDPOINTS
 # ============================================================================
 
+def _normalize_andean_crop(crop_input_str: str) -> Optional[CropType]:
+    """
+    Normalizes Andean crop name variants in Spanish and English to the CropType enum.
+    Supports Papa, Tomate, Café, Maíz, Uchuva, Mora de Castilla, Arveja, and Frutales.
+    """
+    clean_input = crop_input_str.strip().lower()
+    mapping = {
+        "papa": CropType.POTATO,
+        "patata": CropType.POTATO,
+        "potato": CropType.POTATO,
+        "solanum tuberosum": CropType.POTATO,
+        "cafe": CropType.COFFEE,
+        "café": CropType.COFFEE,
+        "coffee": CropType.COFFEE,
+        "coffea arabica": CropType.COFFEE,
+        "maiz": CropType.CORN,
+        "maíz": CropType.CORN,
+        "corn": CropType.CORN,
+        "zea mays": CropType.CORN,
+        "tomate": CropType.TOMATO,
+        "tomato": CropType.TOMATO,
+        "solanum lycopersicum": CropType.TOMATO,
+        "uchuva": CropType.UCHUVA,
+        "physalis": CropType.UCHUVA,
+        "physalis peruviana": CropType.UCHUVA,
+        "cape gooseberry": CropType.UCHUVA,
+        "mora": CropType.MORA,
+        "mora de castilla": CropType.MORA,
+        "rubus glaucus": CropType.MORA,
+        "blackberry": CropType.MORA,
+        "arveja": CropType.PEA,
+        "arvejas": CropType.PEA,
+        "pea": CropType.PEA,
+        "pisum sativum": CropType.PEA,
+        "guisante": CropType.PEA,
+        "frutal": CropType.FRUIT_TREES,
+        "frutales": CropType.FRUIT_TREES,
+        "frutales andinos": CropType.FRUIT_TREES,
+        "fruit": CropType.FRUIT_TREES,
+        "fruit trees": CropType.FRUIT_TREES,
+    }
+    for key, member in mapping.items():
+        if key == clean_input or key in clean_input:
+            return member
+
+    for member in CropType:
+        if member.value.lower() == clean_input:
+            return member
+
+    return None
+
+
 @app.post(
     "/api/v1/diagnose",
-    response_model=DiagnosticResponse,
+    response_model=ClearDiagnosticResponse,
     status_code=status.HTTP_200_OK,
     tags=["Diagnostics"],
     summary="Diagnose Andean Crop Image",
-    description="Receives crop photo and plot metadata, runs Gemini 2.5 Flash, associates with user account, and persists in Supabase.",
+    description=(
+        "Receives crop photo and plot metadata, performs Gemini 2.5 Flash multimodal vision analysis "
+        "structured into 4 ultra-clear farmer sections, associates with user account, and persists in Supabase."
+    ),
 )
 async def diagnose_crop(
-    image: UploadFile = File(..., description="Crop leaf, stem, or plant photo (JPEG/PNG/WebP)"),
-    crop_type: str = Form(..., description="Crop kind: Potato, Coffee, Corn, or Tomato"),
-    plot_name: str = Form("Plot A - Main Lot", description="Farm parcel / lot identifier"),
+    image: UploadFile = File(..., description="Crop leaf, stem, fruit, or plant photo (JPEG/PNG/WebP)"),
+    crop_type: str = Form(..., description="Andean crop: Papa, Café, Tomate, Maíz, Uchuva, Mora, Arveja, Frutales"),
+    plot_name: str = Form("Lote Principal", description="Farm parcel / lot identifier"),
     notes: Optional[str] = Form(None, description="Optional field observations or symptoms noted by the farmer"),
     current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
@@ -368,15 +435,10 @@ async def diagnose_crop(
     with the logged-in farmer account (if present), and stores it in Supabase PostgreSQL.
     Guaranteed zero unhandled 500 errors through defensive fallback mechanisms.
     """
-    # 1. Validate crop type against Andean crop enum
-    normalized_crop = None
-    for member in CropType:
-        if member.value.lower() == crop_type.strip().lower():
-            normalized_crop = member
-            break
-
+    # 1. Validate and normalize crop type against supported Andean crops
+    normalized_crop = _normalize_andean_crop(crop_type)
     if not normalized_crop:
-        valid_crops = ", ".join([c.value for c in CropType])
+        valid_crops = "Papa, Café, Tomate, Maíz, Uchuva, Mora de Castilla, Arveja, Frutales"
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Invalid crop_type '{crop_type}'. Supported Andean crops are: {valid_crops}",
@@ -412,7 +474,7 @@ async def diagnose_crop(
                 image_bytes=image_bytes,
                 mime_type=content_type,
                 crop_type=normalized_crop,
-                plot_name=plot_name.strip() or "General Lot",
+                plot_name=plot_name.strip() or "Lote Principal",
                 notes=notes.strip() if notes else None,
             )
         except Exception as ai_err:
@@ -420,31 +482,35 @@ async def diagnose_crop(
             diagnostic_result = gemini_service._generate_fallback_diagnosis(
                 f"diag-{uuid.uuid4().hex[:12]}",
                 normalized_crop,
-                plot_name.strip() or "General Lot",
+                plot_name.strip() or "Lote Principal",
                 datetime.now(timezone.utc),
             )
 
         user_id = current_user.id if current_user else None
         diagnostic_result.user_id = user_id
+        diagnostic_result.plot_name = plot_name.strip() or "Lote Principal"
 
         # 5. Persist record into Supabase PostgreSQL
         try:
+            conf_score = float(diagnostic_result.confidence_percentage / 100.0)
             db_record = DiagnosticRecord(
                 id=diagnostic_result.id,
                 user_id=user_id,
-                crop_type=diagnostic_result.crop_type.value,
+                crop_type=diagnostic_result.crop_name,
+                part_analyzed=diagnostic_result.part_analyzed,
                 plot_name=diagnostic_result.plot_name,
-                disease_name=diagnostic_result.disease_name,
+                disease_name=diagnostic_result.common_disease_name,
                 scientific_name=diagnostic_result.scientific_name,
-                pathogen_type=diagnostic_result.pathogen_type.value,
-                confidence_score=diagnostic_result.confidence_score,
-                severity_level=diagnostic_result.severity_level.value,
-                symptoms_analysis=diagnostic_result.symptoms_analysis,
-                organic_treatment=diagnostic_result.organic_treatment,
-                chemical_treatment=diagnostic_result.chemical_treatment,
-                preventive_actions=diagnostic_result.preventive_actions,
-                disclaimer=diagnostic_result.disclaimer,
-                timestamp=diagnostic_result.timestamp,
+                pathogen_type="FUNGUS",
+                confidence_score=conf_score,
+                severity_level=diagnostic_result.severity_level,
+                symptoms_analysis=diagnostic_result.summary_what_happened,
+                organic_treatment=[diagnostic_result.organic_solution],
+                chemical_treatment=[diagnostic_result.chemical_solution],
+                preventive_actions=diagnostic_result.immediate_actions,
+                dosage_backpack_20l=diagnostic_result.dosage_backpack_20l,
+                disclaimer="AI-assisted phytosanitary diagnostic for agricultural guidance. Verify with a registered agronomist.",
+                timestamp=datetime.now(timezone.utc),
             )
 
             db.add(db_record)
@@ -452,7 +518,7 @@ async def diagnose_crop(
             db.refresh(db_record)
             print(f"[DIAGNOSE] Record persisted successfully: {db_record.id}")
             logger.info(
-                "Successfully persisted diagnostic record %s (user: %s) to Supabase PostgreSQL.",
+                "Successfully persisted clear diagnostic record %s (user: %s) to Supabase PostgreSQL.",
                 db_record.id,
                 user_id or "guest",
             )
@@ -469,18 +535,24 @@ async def diagnose_crop(
         emergency_fallback = gemini_service._generate_fallback_diagnosis(
             f"diag-{uuid.uuid4().hex[:12]}",
             normalized_crop or CropType.POTATO,
-            plot_name or "General Lot",
+            plot_name or "Lote Principal",
             datetime.now(timezone.utc),
         )
+        emergency_fallback.user_id = current_user.id if current_user else None
         return emergency_fallback
 
 
 @app.get(
-    "/api/v1/history",
-    response_model=List[DiagnosticResponse],
+    "/api/v1/diagnose/history",
+    response_model=List[ClearDiagnosticResponse],
     tags=["Diagnostics"],
-    summary="Retrieve Diagnostic History",
-    description="Fetches previous phytosanitary diagnostics from Supabase PostgreSQL, filtered by authenticated farmer.",
+    summary="Retrieve Persistent Diagnostic History",
+    description="Fetches previous phytosanitary diagnostics from Supabase PostgreSQL, filtered by authenticated farmer and sorted newest first.",
+)
+@app.get(
+    "/api/v1/history",
+    response_model=List[ClearDiagnosticResponse],
+    include_in_schema=False,
 )
 def get_diagnostic_history(
     limit: int = 50,
@@ -488,7 +560,7 @@ def get_diagnostic_history(
     db: Session = Depends(get_db),
 ):
     """
-    Queries diagnostic records stored in Supabase PostgreSQL ordered from newest to oldest.
+    Queries diagnostic records stored in Supabase PostgreSQL ordered from newest to oldest (created_at DESC).
     If authenticated, returns records specifically associated with the logged-in user.
     """
     try:
@@ -499,7 +571,7 @@ def get_diagnostic_history(
             query = query.filter(DiagnosticRecord.user_id == current_user.id)
 
         records = query.order_by(DiagnosticRecord.timestamp.desc()).limit(limit).all()
-        return [DiagnosticResponse.model_validate(rec) for rec in records]
+        return [rec.to_clear_response() for rec in records]
     except Exception as exc:
         logger.error("Failed to query diagnostic history from Supabase: %s", exc)
         raise HTTPException(
@@ -544,18 +616,21 @@ async def agronomic_followup_chat(
             detail=f"Diagnostic record '{diagnostic_id}' was not found.",
         )
 
+    clear_ctx = record.to_clear_response()
     diagnostic_context = {
-        "id": record.id,
-        "crop_type": record.crop_type,
+        "id": clear_ctx.id,
+        "crop_name": clear_ctx.crop_name,
+        "part_analyzed": clear_ctx.part_analyzed,
+        "common_disease_name": clear_ctx.common_disease_name,
+        "scientific_name": clear_ctx.scientific_name,
+        "severity_level": clear_ctx.severity_level,
+        "confidence_percentage": clear_ctx.confidence_percentage,
+        "summary_what_happened": clear_ctx.summary_what_happened,
+        "immediate_actions": clear_ctx.immediate_actions,
+        "organic_solution": clear_ctx.organic_solution,
+        "chemical_solution": clear_ctx.chemical_solution,
+        "dosage_backpack_20l": clear_ctx.dosage_backpack_20l,
         "plot_name": record.plot_name,
-        "disease_name": record.disease_name,
-        "scientific_name": record.scientific_name,
-        "pathogen_type": record.pathogen_type,
-        "severity_level": record.severity_level,
-        "symptoms_analysis": record.symptoms_analysis,
-        "organic_treatment": record.organic_treatment,
-        "chemical_treatment": record.chemical_treatment,
-        "preventive_actions": record.preventive_actions,
     }
 
     # 2. Fetch past conversation turns for this diagnostic
@@ -602,6 +677,14 @@ async def agronomic_followup_chat(
         logger.info("Saved conversation turns for diagnostic %s into Supabase.", diagnostic_id)
 
         return followup_response
+
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Failed to process agronomic follow-up consultation: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Agronomic chat consultation error: {str(exc)}",
+        )
 
     except Exception as exc:
         db.rollback()

@@ -72,6 +72,8 @@ class DiagnosticRecord(Base):
     organic_treatment = Column(JSON, nullable=False, default=list)
     chemical_treatment = Column(JSON, nullable=False, default=list)
     preventive_actions = Column(JSON, nullable=False, default=list)
+    part_analyzed = Column(String(64), nullable=True, default="Hoja / Follaje")
+    dosage_backpack_20l = Column(String(255), nullable=True, default="")
     disclaimer = Column(String(500), nullable=False, default="")
     timestamp = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
@@ -89,6 +91,74 @@ class DiagnosticRecord(Base):
         cascade="all, delete-orphan",
         order_by="DosageAssessment.created_at.desc()",
     )
+
+    def to_clear_response(self):
+        """
+        Transforms relational DiagnosticRecord into a farmer-friendly ClearDiagnosticResponse.
+        Ensures backwards compatibility with records created under legacy formats.
+        """
+        from app.schemas import ClearDiagnosticResponse
+
+        conf_pct = (
+            int(round(self.confidence_score * 100))
+            if self.confidence_score <= 1.0
+            else int(self.confidence_score)
+        )
+
+        sev_map = {
+            "LOW": "Baja",
+            "MODERATE": "Moderada",
+            "CRITICAL": "Crítica",
+            "BAJA": "Baja",
+            "MODERADA": "Moderada",
+            "CRÍTICA": "Crítica",
+            "CRITICA": "Crítica",
+        }
+        mapped_sev = sev_map.get(str(self.severity_level).upper(), str(self.severity_level))
+
+        if isinstance(self.organic_treatment, list):
+            org_str = " ".join(self.organic_treatment) if self.organic_treatment else "Aplicar biofertilizante foliar orgánico."
+        else:
+            org_str = str(self.organic_treatment)
+
+        if isinstance(self.chemical_treatment, list):
+            chem_str = " ".join(self.chemical_treatment) if self.chemical_treatment else "Consulte con el agrónomo de confianza para el ingrediente activo."
+        else:
+            chem_str = str(self.chemical_treatment)
+
+        imm_act = (
+            list(self.preventive_actions)
+            if isinstance(self.preventive_actions, list)
+            else [str(self.preventive_actions)]
+        )
+        if not imm_act or len(imm_act) == 0:
+            imm_act = [
+                "Podar y retirar de inmediato el material vegetal infectado.",
+                "Mejorar drenajes y aireación en el lote.",
+                "Fumigar en horas tempranas de la mañana con equipo de protección.",
+            ]
+        while len(imm_act) < 3:
+            imm_act.append("Monitorear el avance del cultivo cada 3 días.")
+
+        dosage_val = self.dosage_backpack_20l or "50g o 30cc por bomba de 20L"
+
+        return ClearDiagnosticResponse(
+            id=self.id,
+            crop_name=self.crop_type,
+            part_analyzed=self.part_analyzed or "Hoja / Follaje",
+            common_disease_name=self.disease_name,
+            scientific_name=self.scientific_name,
+            severity_level=mapped_sev,
+            confidence_percentage=conf_pct,
+            summary_what_happened=self.symptoms_analysis,
+            immediate_actions=imm_act[:3],
+            organic_solution=org_str,
+            chemical_solution=chem_str,
+            dosage_backpack_20l=dosage_val,
+            created_at=self.timestamp.isoformat() if self.timestamp else utc_now().isoformat(),
+            user_id=self.user_id,
+            plot_name=self.plot_name,
+        )
 
 
 class ChatThreadMessage(Base):
