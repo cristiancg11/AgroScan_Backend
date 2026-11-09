@@ -6,7 +6,7 @@ authentication, and structured output extraction with Google Gemini 2.5 Flash.
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
@@ -279,6 +279,23 @@ class ChatFollowUpResponse(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc),
         description="UTC timestamp of response generation"
     )
+
+
+class ChatRequestSchema(BaseModel):
+    """
+    Dynamic live agronomic chat request payload.
+    """
+    message: str = Field(..., description="Farmer question or technical agronomic consultation")
+    history: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="Prior conversational turns")
+    crop: Optional[str] = Field(default="General", description="Target Andean crop or general context")
+    disease_context: Optional[str] = Field(default="Ninguno", description="Diagnosed phytopathological condition")
+
+
+class ChatResponseSchema(BaseModel):
+    """
+    Dynamic live agronomic chat response generated directly by Gemini 2.5 Flash.
+    """
+    reply: str = Field(..., description="Direct, helpful, practical agronomic advice for the farmer")
 
 
 class HealthCheckResponse(BaseModel):

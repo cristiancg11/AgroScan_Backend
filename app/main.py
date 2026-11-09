@@ -23,6 +23,8 @@ from app.schemas import (
     ChatMessage,
     ChatFollowUpRequest,
     ChatFollowUpResponse,
+    ChatRequestSchema,
+    ChatResponseSchema,
     ClearDiagnosticResponse,
     CropType,
     DiagnosticResponse,
@@ -35,7 +37,10 @@ from app.schemas import (
     UserRegisterRequest,
 )
 from app.security import create_access_token, get_password_hash, verify_password
-from app.services.gemini_service import gemini_service
+from app.services.gemini_service import gemini_service, generate_dynamic_agronomic_chat
+
+# Model alias for flexible diagnostic querying
+Diagnostic = DiagnosticRecord
 
 # Configure application logging
 logging.basicConfig(
@@ -581,118 +586,85 @@ def get_diagnostic_history(
 
 
 # ============================================================================
-# AGRONOMIC CHAT FOLLOW-UP ENDPOINT
+# AGRONOMIC CHAT ENDPOINTS (LIVE GEMINI 2.5 FLASH)
 # ============================================================================
 
 @app.post(
     "/api/v1/diagnose/{diagnostic_id}/chat",
-    response_model=ChatFollowUpResponse,
+    response_model=ChatResponseSchema,
     tags=["Consultation"],
-    summary="Interactive Agronomic Follow-Up Consultation",
-    description="Enables interactive consultation with field agronomist AI grounded on a specific diagnostic session.",
+    summary="Interactive Diagnostic-Linked Dynamic Agronomic Chat",
+    description="Connects directly to Google Gemini 2.5 Flash to answer any agronomic question dynamically without hardcoded limits.",
 )
-async def agronomic_followup_chat(
+def chat_diagnostic_endpoint(
     diagnostic_id: str,
-    payload: ChatFollowUpRequest,
+    payload: ChatRequestSchema,
     db: Session = Depends(get_db),
 ):
     """
-    Handles follow-up technical questions grounded on a specific diagnostic record.
-    Retrieves diagnostic ground truth, fetches chat history from Supabase, calls Gemini service,
-    and records both question and answer turns into the chat_thread_messages table.
+    Diagnostic-grounded consultation endpoint powered dynamically by Gemini 2.5 Flash.
+    Pulls crop and disease context from Supabase PostgreSQL if available.
     """
-    clean_message = payload.message.strip()
-    if not clean_message:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Message content cannot be empty.",
-        )
+    crop = payload.crop or "General"
+    disease = payload.disease_context or "Ninguno"
+    try:
+        diag = db.query(Diagnostic).filter(Diagnostic.id == diagnostic_id).first()
+        if diag:
+            crop = getattr(diag, "crop_name", None) or getattr(diag, "crop_type", None) or crop
+            disease = getattr(diag, "common_disease_name", None) or getattr(diag, "disease_name", None) or disease
+    except Exception:
+        pass
 
-    # 1. Fetch diagnostic context from Supabase PostgreSQL
-    record = db.query(DiagnosticRecord).filter(DiagnosticRecord.id == diagnostic_id).first()
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Diagnostic record '{diagnostic_id}' was not found.",
-        )
+    history_turns = payload.history or []
 
-    clear_ctx = record.to_clear_response()
-    diagnostic_context = {
-        "id": clear_ctx.id,
-        "crop_name": clear_ctx.crop_name,
-        "part_analyzed": clear_ctx.part_analyzed,
-        "common_disease_name": clear_ctx.common_disease_name,
-        "scientific_name": clear_ctx.scientific_name,
-        "severity_level": clear_ctx.severity_level,
-        "confidence_percentage": clear_ctx.confidence_percentage,
-        "summary_what_happened": clear_ctx.summary_what_happened,
-        "immediate_actions": clear_ctx.immediate_actions,
-        "organic_solution": clear_ctx.organic_solution,
-        "chemical_solution": clear_ctx.chemical_solution,
-        "dosage_backpack_20l": clear_ctx.dosage_backpack_20l,
-        "plot_name": record.plot_name,
-    }
-
-    # 2. Fetch past conversation turns for this diagnostic
-    past_messages = (
-        db.query(ChatThreadMessage)
-        .filter(ChatThreadMessage.diagnostic_id == diagnostic_id)
-        .order_by(ChatThreadMessage.timestamp.asc())
-        .all()
+    reply_text = generate_dynamic_agronomic_chat(
+        user_message=payload.message,
+        crop=crop,
+        disease_context=disease,
+        history=history_turns,
     )
 
-    history = [
-        ChatMessage(role=msg.role, content=msg.content, timestamp=msg.timestamp)
-        for msg in past_messages
-    ]
-
-    # Combine with client-supplied history if any
-    if payload.chat_history:
-        history.extend(payload.chat_history)
-
-    # 3. Generate response via Gemini agronomic service
+    # Persist conversational turns to Supabase if diagnostic exists
     try:
-        followup_response = await gemini_service.generate_agronomic_followup(
-            diagnostic_context=diagnostic_context,
-            user_question=clean_message,
-            history=history,
-        )
-
-        # 4. Save both user and model message turns into Supabase
         user_turn = ChatThreadMessage(
             diagnostic_id=diagnostic_id,
             role="user",
-            content=clean_message,
+            content=payload.message,
         )
         model_turn = ChatThreadMessage(
             diagnostic_id=diagnostic_id,
             role="model",
-            content=followup_response.reply,
-            timestamp=followup_response.timestamp,
+            content=reply_text,
         )
-
         db.add(user_turn)
         db.add(model_turn)
         db.commit()
-        logger.info("Saved conversation turns for diagnostic %s into Supabase.", diagnostic_id)
-
-        return followup_response
-
-    except Exception as exc:
+    except Exception:
         db.rollback()
-        logger.exception("Failed to process agronomic follow-up consultation: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Agronomic chat consultation error: {str(exc)}",
-        )
 
-    except Exception as exc:
-        db.rollback()
-        logger.exception("Failed to process agronomic follow-up consultation: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Agronomic chat consultation error: {str(exc)}",
-        )
+    return {"reply": reply_text}
+
+
+@app.post(
+    "/api/v1/chat",
+    response_model=ChatResponseSchema,
+    tags=["Consultation"],
+    summary="General Dynamic Agronomic Chat",
+    description="Direct endpoint connecting to Google Gemini 2.5 Flash to answer any agricultural question openly.",
+)
+def chat_general_endpoint(payload: ChatRequestSchema):
+    """
+    Open agronomic chat consultation endpoint powered dynamically by Gemini 2.5 Flash.
+    """
+    history_turns = payload.history or []
+
+    reply_text = generate_dynamic_agronomic_chat(
+        user_message=payload.message,
+        crop=payload.crop or "General",
+        disease_context=payload.disease_context or "General",
+        history=history_turns,
+    )
+    return {"reply": reply_text}
 
 
 # ============================================================================
