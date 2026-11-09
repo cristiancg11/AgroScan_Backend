@@ -16,13 +16,15 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import Base, engine, get_db
 from app.dependencies import get_current_user, get_current_user_optional
-from app.models import ChatThreadMessage, DiagnosticRecord, User
+from app.models import ChatThreadMessage, DiagnosticRecord, DosageAssessment, User
 from app.schemas import (
     ChatMessage,
     ChatFollowUpRequest,
     ChatFollowUpResponse,
     CropType,
     DiagnosticResponse,
+    DosageCalculationRequest,
+    DosageCalculationResponse,
     HealthCheckResponse,
     TokenResponse,
     UserLoginRequest,
@@ -499,6 +501,142 @@ async def agronomic_followup_chat(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Agronomic chat consultation error: {str(exc)}",
         )
+
+
+# ============================================================================
+# AI DOSAGE CALCULATOR & WEATHER RISK ENDPOINTS
+# ============================================================================
+
+@app.post(
+    "/api/v1/diagnose/{diagnostic_id}/dosage",
+    response_model=DosageCalculationResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Dosage & Safety"],
+    summary="Calculate AI Backpack Sprayer Dosage & Weather Risk",
+    description="Calculates calibrated backpack tank requirements, product concentration, rainfastness, and economic loss risks.",
+)
+async def calculate_crop_dosage(
+    diagnostic_id: str,
+    payload: DosageCalculationRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Computes precision pesticide / bio-input spray calibrations for a specific diagnostic report
+    and parcel surface area, persisting the assessment in Supabase PostgreSQL.
+    """
+    # 1. Validate diagnostic record existence
+    record = db.query(DiagnosticRecord).filter(DiagnosticRecord.id == diagnostic_id).first()
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Diagnostic report '{diagnostic_id}' was not found.",
+        )
+
+    diagnostic_context = {
+        "id": record.id,
+        "crop_type": record.crop_type,
+        "plot_name": record.plot_name,
+        "disease_name": record.disease_name,
+        "scientific_name": record.scientific_name,
+        "pathogen_type": record.pathogen_type,
+        "severity_level": record.severity_level,
+        "symptoms_analysis": record.symptoms_analysis,
+        "organic_treatment": record.organic_treatment,
+        "chemical_treatment": record.chemical_treatment,
+        "preventive_actions": record.preventive_actions,
+    }
+
+    try:
+        # 2. Invoke Gemini 2.5 Flash calculation engine
+        dosage_result = await gemini_service.calculate_smart_dosage(
+            diagnostic_data=diagnostic_context,
+            area_sqm=payload.plot_area_sqm,
+            tank_capacity=payload.backpack_capacity_liters,
+        )
+
+        # 3. Persist calculation in Supabase PostgreSQL
+        assessment_id = f"dose-{uuid.uuid4().hex[:12]}"
+        assessment_record = DosageAssessment(
+            id=assessment_id,
+            diagnostic_id=diagnostic_id,
+            plot_area_sqm=payload.plot_area_sqm,
+            total_tanks_needed=dosage_result.total_tanks_needed,
+            product_recommended=dosage_result.product_recommended,
+            concentration_per_tank=dosage_result.concentration_per_20l_backpack,
+            rain_safety_interval_hours=dosage_result.rain_safety_interval_hours,
+            economic_loss_risk=dosage_result.estimated_economic_loss_percentage,
+            full_prescription_payload=dosage_result.model_dump(),
+        )
+
+        db.add(assessment_record)
+        db.commit()
+        db.refresh(assessment_record)
+        logger.info(
+            "Persisted dosage assessment %s for diagnosis %s (Area: %s m², Tanks: %s)",
+            assessment_id,
+            diagnostic_id,
+            payload.plot_area_sqm,
+            dosage_result.total_tanks_needed,
+        )
+
+        return dosage_result
+
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Failed to calculate dosage prescription: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Dosage calculation engine error: {str(exc)}",
+        )
+
+
+@app.get(
+    "/api/v1/diagnose/{diagnostic_id}/dosage",
+    response_model=List[DosageCalculationResponse],
+    tags=["Dosage & Safety"],
+    summary="Retrieve Dosage Calculation History for Diagnosis",
+    description="Retrieves previous backpack sprayer dosage prescriptions computed for a specific diagnostic session.",
+)
+def get_diagnosis_dosages(
+    diagnostic_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Returns all dosage assessments previously calculated for this diagnostic record.
+    """
+    record = db.query(DiagnosticRecord).filter(DiagnosticRecord.id == diagnostic_id).first()
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Diagnostic report '{diagnostic_id}' was not found.",
+        )
+
+    assessments = (
+        db.query(DosageAssessment)
+        .filter(DosageAssessment.diagnostic_id == diagnostic_id)
+        .order_by(DosageAssessment.created_at.desc())
+        .all()
+    )
+
+    results = []
+    for a in assessments:
+        if a.full_prescription_payload:
+            results.append(DosageCalculationResponse.model_validate(a.full_prescription_payload))
+        else:
+            results.append(
+                DosageCalculationResponse(
+                    product_recommended=a.product_recommended,
+                    concentration_per_20l_backpack=a.concentration_per_tank,
+                    total_tanks_needed=a.total_tanks_needed,
+                    total_product_quantity="Calculated in assessment",
+                    rain_safety_interval_hours=a.rain_safety_interval_hours,
+                    estimated_economic_loss_percentage=a.economic_loss_risk,
+                    protective_equipment_ppe=[],
+                    application_tips=[],
+                )
+            )
+
+    return results
 
 
 if __name__ == "__main__":
