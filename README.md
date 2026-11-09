@@ -86,6 +86,20 @@ Developed specifically for smallholder farming communities in **Nariño, Colombi
 | `content` | `TEXT` | Message text content |
 | `timestamp` | `TIMESTAMPTZ` | Timestamp of message turn (UTC) |
 
+### `dosage_assessments` Table
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `id` | `VARCHAR(64)` | Primary Key (UUID format `dose-xxx`) |
+| `diagnostic_id` | `VARCHAR(64)` | Foreign Key -> `diagnostics(id)` (ON DELETE CASCADE, Indexed) |
+| `plot_area_sqm` | `FLOAT` | Evaluated parcel area in square meters |
+| `total_tanks_needed` | `FLOAT` | Number of 20-Liter backpack spray loads required |
+| `product_recommended` | `VARCHAR(255)` | Recommended active ingredient or biological bio-input |
+| `concentration_per_tank`| `VARCHAR(255)` | Grams or milliliters per 20L tank |
+| `rain_safety_interval_hours`| `INTEGER` | Minimum rainfast drying interval (hours) |
+| `economic_loss_risk` | `FLOAT` | Estimated yield loss percentage if left untreated within 5 days |
+| `full_prescription_payload` | `JSON` | Full prescription JSON including PPE and application tips |
+| `created_at` | `TIMESTAMPTZ` | Assessment creation timestamp (UTC) |
+
 ---
 
 ## 4. API Endpoints
@@ -100,12 +114,31 @@ Developed specifically for smallholder farming communities in **Nariño, Colombi
 | `POST` | `/api/v1/diagnose` | Upload crop leaf image (`multipart/form-data`) for AI diagnosis |
 | `GET` | `/api/v1/history` | Retrieve historical diagnosis records (filtered by user if authenticated) |
 | `POST` | `/api/v1/diagnose/{id}/chat` | Interactive agronomic follow-up consultation grounded on diagnosis |
+| `POST` | `/api/v1/diagnose/{id}/dosage` | Calculate calibrated 20L backpack tank requirements & weather risk |
+| `GET` | `/api/v1/diagnose/{id}/dosage` | Retrieve previously calculated dosage assessments for a diagnosis |
 | `GET` | `/docs` | Interactive Swagger UI API documentation |
 | `GET` | `/redoc` | OpenAPI Redoc documentation |
 
 ---
 
-## 5. Environment Variables Setup
+## 5. AI Backpack Sprayer Calibration & Andean Weather Risk Engine
+
+Smallholder Andean farmers in Nariño cultivate steep hillside terraces where precision spraying and weather timing are critical to avoid chemical wash-off and yield loss.
+
+### Agronomic Calibration Heuristics:
+- **Application Volume per Hectare**:
+  * **Potato (*Solanum tuberosum*) & Tomato (*Solanum lycopersicum*)**: $250 - 400\text{ L/ha}$ (dense canopy coverage, equal to 12.5 to 20 tanks of 20L per hectare).
+  * **Coffee (*Coffea arabica*) & Corn (*Zea mays*)**: $150 - 300\text{ L/ha}$ (7.5 to 15 tanks of 20L per hectare).
+- **Backpack Sprayer Sizing Formulation**:
+  $$\text{Tanks Needed} = \max\left(1.0,\, \frac{\text{Plot Area (m}^2\text{)}}{10,000} \times \frac{\text{Target Volume (L/ha)}}{20\text{ L/tank}}\right)$$
+- **Rainfastness Safety Interval**:
+  Andean afternoon convective rain cycles require a minimum drying window of 3 to 4 hours post-application for systemic fungicides (or 2 hours with organosilicone surfactants).
+- **Economic Loss Risk**:
+  Quantifies potential 5-day crop loss based on pathogen virulence (e.g., *Phytophthora infestans* Late Blight can destroy potato canopies in 7-10 days under humid conditions).
+
+---
+
+## 6. Environment Variables Setup
 
 Create a `.env` file in the project root (see `.env.example`):
 
@@ -126,7 +159,7 @@ CORS_ORIGINS=http://localhost:5173,http://localhost:5180
 
 ---
 
-## 6. Installation & Execution
+## 7. Installation & Execution
 
 ### 1. Create and Activate Virtual Environment
 ```bash
