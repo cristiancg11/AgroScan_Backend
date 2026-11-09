@@ -5,6 +5,7 @@ and JWT-authenticated agronomic consultations.
 """
 
 import logging
+import traceback
 import uuid
 from contextlib import asynccontextmanager
 from typing import List, Optional
@@ -238,8 +239,9 @@ def register_farmer(
         raise
     except Exception as exc:
         db.rollback()
-        print(f"--> [AUTH ERROR] Registration failed: {exc}")
-        logger.exception("Unexpected error in register_farmer: %s", exc)
+        tb_str = traceback.format_exc()
+        print(f"--> [AUTH ERROR] Registration failed with traceback:\n{tb_str}")
+        logger.error("Unexpected error in register_farmer: %s\n%s", exc, tb_str)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Registration failed: {str(exc)}",
