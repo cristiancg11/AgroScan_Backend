@@ -1,31 +1,38 @@
 """
 Security and Cryptography Module for AgroScan AI.
-Provides bcrypt password hashing, credential verification, and signed JWT issuance.
+Provides native bcrypt password hashing, credential verification, and signed JWT issuance.
+Eliminates passlib compatibility issues with modern bcrypt releases.
 """
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+import bcrypt
 import jwt
-from passlib.context import CryptContext
 
 from app.config import settings
-
-# Cryptographic password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def get_password_hash(password: str) -> str:
     """
-    Computes secure one-way bcrypt salt and hash of plaintext password.
+    Computes secure one-way bcrypt salt and hash of plaintext password using native bcrypt.
+    Guarantees compatibility and eliminates passlib version bugs.
     """
-    return pwd_context.hash(password)
+    pwd_bytes = password.encode("utf-8")
+    salt = bcrypt.gensalt(rounds=12)
+    return bcrypt.hashpw(pwd_bytes, salt).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
-    Verifies plaintext password against stored bcrypt hash.
+    Verifies plaintext password against stored bcrypt hash safely.
     """
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return bcrypt.checkpw(
+            plain_password.encode("utf-8"),
+            hashed_password.encode("utf-8"),
+        )
+    except Exception:
+        return False
 
 
 def create_access_token(

@@ -178,58 +178,72 @@ def register_farmer(
 ):
     """
     Creates a new farmer profile in Supabase PostgreSQL and returns signed JWT access token.
+    Defensively handles errors to return structured JSON without 500 crashes.
     """
     print(f"--> [AUTH] Incoming registration payload: {payload}")
-    clean_email = payload.email.strip().lower()
+    try:
+        clean_email = payload.email.strip().lower()
 
-    # Check for existing user account
-    existing = db.query(User).filter(User.email == clean_email).first()
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="An account with this email address is already registered.",
+        # Check for existing user account
+        existing = db.query(User).filter(User.email == clean_email).first()
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="An account with this email address is already registered.",
+            )
+
+        # Hash password safely with native bcrypt
+        hashed = get_password_hash(payload.password)
+        user_id = str(uuid.uuid4())
+
+        new_user = User(
+            id=user_id,
+            full_name=payload.full_name.strip(),
+            email=clean_email,
+            hashed_password=hashed,
+            farm_name=payload.farm_name.strip(),
         )
 
-    # Hash password with bcrypt
-    hashed = get_password_hash(payload.password)
-    user_id = str(uuid.uuid4())
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+        print(f"[AUTH] User created successfully: {new_user.email} ({new_user.id})")
+        logger.info("Registered new farmer user '%s' (%s)", new_user.email, new_user.id)
 
-    new_user = User(
-        id=user_id,
-        full_name=payload.full_name.strip(),
-        email=clean_email,
-        hashed_password=hashed,
-        farm_name=payload.farm_name.strip(),
-    )
+        # Issue JWT access token
+        access_token = create_access_token(
+            data={"sub": new_user.id, "email": new_user.email}
+        )
 
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    print(f"[AUTH] User created successfully: {new_user.email}")
-    logger.info("Registered new farmer user '%s' (%s)", new_user.email, new_user.id)
+        profile = UserProfileResponse(
+            id=new_user.id,
+            email=new_user.email,
+            full_name=new_user.full_name,
+            farm_name=new_user.farm_name,
+            created_at=new_user.created_at,
+        )
 
-    # Issue JWT access token
-    access_token = create_access_token(
-        data={"sub": new_user.id, "email": new_user.email}
-    )
+        return TokenResponse(
+            access_token=access_token,
+            token_type="bearer",
+            user_id=new_user.id,
+            full_name=new_user.full_name,
+            farm_name=new_user.farm_name,
+            email=new_user.email,
+            user=profile,
+        )
 
-    profile = UserProfileResponse(
-        id=new_user.id,
-        email=new_user.email,
-        full_name=new_user.full_name,
-        farm_name=new_user.farm_name,
-        created_at=new_user.created_at,
-    )
-
-    return TokenResponse(
-        access_token=access_token,
-        token_type="bearer",
-        user_id=new_user.id,
-        full_name=new_user.full_name,
-        farm_name=new_user.farm_name,
-        email=new_user.email,
-        user=profile,
-    )
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        print(f"--> [AUTH ERROR] Registration failed: {exc}")
+        logger.exception("Unexpected error in register_farmer: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Registration failed: {str(exc)}",
+        )
 
 
 @app.post(
@@ -260,39 +274,50 @@ def login_farmer(
     Validates farmer email and password credentials, returning a signed JWT access token.
     """
     print(f"--> [AUTH] Incoming login attempt: {payload.email}")
-    clean_email = payload.email.strip().lower()
-    user = db.query(User).filter(User.email == clean_email).first()
+    try:
+        clean_email = payload.email.strip().lower()
+        user = db.query(User).filter(User.email == clean_email).first()
 
-    if not user or not verify_password(payload.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password credentials. Please verify your details.",
-            headers={"WWW-Authenticate": "Bearer"},
+        if not user or not verify_password(payload.password, user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password credentials. Please verify your details.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        access_token = create_access_token(
+            data={"sub": user.id, "email": user.email}
+        )
+        print(f"[AUTH] User logged in successfully: {user.email}")
+        logger.info("Authenticated farmer user '%s'", user.email)
+
+        profile = UserProfileResponse(
+            id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            farm_name=user.farm_name,
+            created_at=user.created_at,
         )
 
-    access_token = create_access_token(
-        data={"sub": user.id, "email": user.email}
-    )
-    print(f"[AUTH] User logged in successfully: {user.email}")
-    logger.info("Authenticated farmer user '%s'", user.email)
+        return TokenResponse(
+            access_token=access_token,
+            token_type="bearer",
+            user_id=user.id,
+            full_name=user.full_name,
+            farm_name=user.farm_name,
+            email=user.email,
+            user=profile,
+        )
 
-    profile = UserProfileResponse(
-        id=user.id,
-        email=user.email,
-        full_name=user.full_name,
-        farm_name=user.farm_name,
-        created_at=user.created_at,
-    )
-
-    return TokenResponse(
-        access_token=access_token,
-        token_type="bearer",
-        user_id=user.id,
-        full_name=user.full_name,
-        farm_name=user.farm_name,
-        email=user.email,
-        user=profile,
-    )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"--> [AUTH ERROR] Login failed: {exc}")
+        logger.exception("Unexpected error in login_farmer: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Login authentication failed: {str(exc)}",
+        )
 
 
 @app.get(
