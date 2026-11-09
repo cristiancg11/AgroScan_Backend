@@ -64,13 +64,18 @@ class UserLoginRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     """
-    JWT token response payload.
+    JWT token response payload returning session token and user profile.
     """
     access_token: str = Field(..., description="Signed JWT Bearer access token")
     token_type: str = Field(default="bearer", description="Token authentication scheme")
     user_id: str = Field(..., description="Authenticated user UUID")
     full_name: str = Field(..., description="Farmer full name")
     farm_name: str = Field(..., description="Farm or parcel designation")
+    email: Optional[str] = Field(default=None, description="Registered email address")
+    user: Optional[UserProfileResponse] = Field(
+        default=None,
+        description="Nested user profile object for instant frontend state initialization"
+    )
 
 
 class UserProfileResponse(BaseModel):

@@ -168,7 +168,7 @@ def register_farmer(
 
     # Hash password with bcrypt
     hashed = get_password_hash(payload.password)
-    user_id = f"usr-{uuid.uuid4().hex[:12]}"
+    user_id = str(uuid.uuid4())
 
     new_user = User(
         id=user_id,
@@ -181,11 +181,20 @@ def register_farmer(
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
+    print(f"[AUTH] User created successfully: {new_user.email}")
     logger.info("Registered new farmer user '%s' (%s)", new_user.email, new_user.id)
 
     # Issue JWT access token
     access_token = create_access_token(
         data={"sub": new_user.id, "email": new_user.email}
+    )
+
+    profile = UserProfileResponse(
+        id=new_user.id,
+        email=new_user.email,
+        full_name=new_user.full_name,
+        farm_name=new_user.farm_name,
+        created_at=new_user.created_at,
     )
 
     return TokenResponse(
@@ -194,6 +203,8 @@ def register_farmer(
         user_id=new_user.id,
         full_name=new_user.full_name,
         farm_name=new_user.farm_name,
+        email=new_user.email,
+        user=profile,
     )
 
 
@@ -225,7 +236,16 @@ def login_farmer(
     access_token = create_access_token(
         data={"sub": user.id, "email": user.email}
     )
+    print(f"[AUTH] User logged in successfully: {user.email}")
     logger.info("Authenticated farmer user '%s'", user.email)
+
+    profile = UserProfileResponse(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        farm_name=user.farm_name,
+        created_at=user.created_at,
+    )
 
     return TokenResponse(
         access_token=access_token,
@@ -233,6 +253,8 @@ def login_farmer(
         user_id=user.id,
         full_name=user.full_name,
         farm_name=user.farm_name,
+        email=user.email,
+        user=profile,
     )
 
 
