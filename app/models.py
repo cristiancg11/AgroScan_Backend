@@ -83,6 +83,12 @@ class DiagnosticRecord(Base):
         cascade="all, delete-orphan",
         order_by="ChatThreadMessage.timestamp.asc()",
     )
+    dosage_assessments = relationship(
+        "DosageAssessment",
+        back_populates="diagnostic",
+        cascade="all, delete-orphan",
+        order_by="DosageAssessment.created_at.desc()",
+    )
 
 
 class ChatThreadMessage(Base):
@@ -104,3 +110,30 @@ class ChatThreadMessage(Base):
     timestamp = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     diagnostic = relationship("DiagnosticRecord", back_populates="chat_messages")
+
+
+class DosageAssessment(Base):
+    """
+    DosageAssessment model storing AI-computed backpack sprayer dosage calibrations
+    and Andean weather rainfastness risk assessments.
+    """
+    __tablename__ = "dosage_assessments"
+
+    id = Column(String(64), primary_key=True, index=True)
+    diagnostic_id = Column(
+        String(64),
+        ForeignKey("diagnostics.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    plot_area_sqm = Column(Float, nullable=False)
+    total_tanks_needed = Column(Float, nullable=False)
+    product_recommended = Column(String(255), nullable=False)
+    concentration_per_tank = Column(String(255), nullable=False)
+    rain_safety_interval_hours = Column(Integer, nullable=False)
+    economic_loss_risk = Column(Float, nullable=False)
+    full_prescription_payload = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    diagnostic = relationship("DiagnosticRecord", back_populates="dosage_assessments")
+
