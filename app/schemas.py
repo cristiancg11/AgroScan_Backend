@@ -217,3 +217,63 @@ class HealthCheckResponse(BaseModel):
     version: str
     gemini_configured: bool
     database_connected: bool
+
+
+# ============================================================================
+# DOSAGE & WEATHER RISK SCHEMAS
+# ============================================================================
+
+class DosageCalculationRequest(BaseModel):
+    """
+    Payload for AI backpack sprayer dosage calculation and weather risk assessment.
+    """
+    diagnostic_id: str = Field(..., description="Target diagnostic session UUID")
+    plot_area_sqm: float = Field(..., gt=0.0, description="Plot area in square meters (e.g., 2500 for 0.25 ha)")
+    backpack_capacity_liters: float = Field(default=20.0, gt=0.0, description="Backpack sprayer tank volume in liters")
+    application_method: str = Field(
+        default="manual_backpack",
+        description="Sprayer mechanism: 'manual_backpack' or 'motorized_sprayer'"
+    )
+
+
+class DosageCalculationResponse(BaseModel):
+    """
+    Structured prescription response model for precision Andean phytosanitary spraying.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    product_recommended: str = Field(
+        ...,
+        description="Selected chemical active ingredient or biological bio-input formulation"
+    )
+    concentration_per_20l_backpack: str = Field(
+        ...,
+        description="Calibrated dilution dose per 20-liter tank (e.g., '50g or 30cc per 20L tank')"
+    )
+    total_tanks_needed: float = Field(
+        ...,
+        description="Total number of 20L backpack loads required to cover the specified parcel area"
+    )
+    total_product_quantity: str = Field(
+        ...,
+        description="Total quantity of commercial product required for the full plot treatment"
+    )
+    rain_safety_interval_hours: int = Field(
+        ...,
+        description="Minimum rainfast drying window in hours to prevent wash-off by Andean rainfall"
+    )
+    estimated_economic_loss_percentage: float = Field(
+        ...,
+        ge=0.0,
+        le=100.0,
+        description="Estimated harvest yield economic loss (0-100%) if the disease remains untreated within 5 days"
+    )
+    protective_equipment_ppe: List[str] = Field(
+        default_factory=list,
+        description="Mandatory personal protective equipment items required during preparation and application"
+    )
+    application_tips: List[str] = Field(
+        default_factory=list,
+        description="Highland agronomic application tips (sprayer pressure, nozzle type, time of day)"
+    )
+
