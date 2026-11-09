@@ -18,6 +18,7 @@ from app.schemas import (
     ChatFollowUpResponse,
     CropType,
     DiagnosticResponse,
+    DosageCalculationResponse,
     PathogenType,
     SeverityLevel,
 )
@@ -65,6 +66,26 @@ Ground Rules:
     "suggested_followups": ["Question 1?", "Question 2?", "Question 3?"]
   }
 """
+
+# System prompt for precision backpack sprayer dosage calculation & weather risk assessment
+ANDEAN_DOSAGE_SYSTEM_PROMPT = """
+You are AgroScan AI's Senior Precision Agricultural Extension Specialist and Agro-meteorologist for the Andean region of Nariño, Colombia (altitudes 1,500m to 3,200m a.s.l.).
+Your mission is to compute precise spray calibration for a manual 20-Liter agricultural backpack sprayer ('bomba de espalda de 20 litros') and evaluate weather rainfastness risks based on diagnostic findings and field area.
+
+Agronomic Calibration Rules:
+- High-altitude spray volume references:
+  * Potato (Solanum tuberosum) and Tomato (Solanum lycopersicum): 250 to 400 Liters/hectare (equivalent to 12.5 to 20 tanks of 20L per hectare / 10,000 m²).
+  * Coffee (Coffea arabica) and Corn (Zea mays): 150 to 300 Liters/hectare (equivalent to 7.5 to 15 tanks of 20L per hectare / 10,000 m²).
+- Calculate total 20L backpack tanks required for the user's declared plot area (plot_area_sqm).
+- Determine product concentration per 20L backpack (grams of WP/WG or milliliters of EC/SC per 20L tank).
+- Compute total product quantity needed across all tanks for the complete parcel.
+- Rain safety window (rainfastness): Evaluate rain wash-off risks considering Andean afternoon convection showers and steep hillside runoff. Provide hours needed before rainfall.
+- Estimated economic loss: Quantify harvest yield loss percentage (0.0 to 100.0%) if left untreated within 5 days based on disease virulence and severity.
+- Mandatory PPE: Prescribe specific protective gear (nitrile gloves, charcoal vapor respirator, goggles, PVC apron, rubber boots).
+- Practical application tips: Optimal nozzle type (hollow cone vs flat fan), pressure (2-3 bar), and morning spraying window (6:00 AM - 9:00 AM).
+- Output MUST strictly conform to the DosageCalculationResponse JSON schema.
+"""
+
 
 
 class GeminiAgronomicService:
@@ -381,6 +402,133 @@ class GeminiAgronomicService:
             reply=reply,
             suggested_followups=suggested,
             timestamp=timestamp,
+        )
+
+
+    async def calculate_smart_dosage(
+        self,
+        diagnostic_data: dict,
+        area_sqm: float,
+        tank_capacity: float = 20.0,
+    ) -> DosageCalculationResponse:
+        """
+        Calculates precision pesticide/bio-input dosage, total 20L backpack tanks needed,
+        rainfast safety windows, and harvest loss risk using Gemini 2.5 Flash structured inference.
+        """
+        if self._client:
+            try:
+                context_str = json.dumps(diagnostic_data, default=str, indent=2)
+                dosage_prompt = (
+                    f"Ground Truth Crop Diagnostic Report:\n{context_str}\n\n"
+                    f"Farmer Field Parameters:\n"
+                    f"- Parcel Area: {area_sqm} m² ({round(area_sqm / 10000.0, 4)} hectares)\n"
+                    f"- Sprayer Tank Capacity: {tank_capacity} Liters\n\n"
+                    f"Calculate calibrated sprayer requirements and rain risk assessment. "
+                    f"Output strictly according to DosageCalculationResponse schema."
+                )
+
+                config = types.GenerateContentConfig(
+                    system_instruction=ANDEAN_DOSAGE_SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    response_schema=DosageCalculationResponse,
+                    temperature=0.2,
+                )
+
+                response = self._client.models.generate_content(
+                    model=self._model_id,
+                    contents=[dosage_prompt],
+                    config=config,
+                )
+
+                if response and response.text:
+                    parsed = json.loads(response.text)
+                    return DosageCalculationResponse.model_validate(parsed)
+
+            except Exception as exc:
+                logger.error("Gemini 2.5 Flash dosage calculation error: %s. Using agronomic calibration model.", exc)
+
+        return self._generate_fallback_dosage(diagnostic_data, area_sqm, tank_capacity)
+
+    def _generate_fallback_dosage(
+        self,
+        diagnostic_data: dict,
+        area_sqm: float,
+        tank_capacity: float = 20.0,
+    ) -> DosageCalculationResponse:
+        """
+        Agronomic calibration formula based on Andean extension parameters.
+        """
+        crop = str(diagnostic_data.get("crop_type", "Potato")).lower()
+        disease = diagnostic_data.get("disease_name", "Late Blight")
+        severity = str(diagnostic_data.get("severity_level", "MODERATE")).upper()
+
+        # Liters per hectare calibration
+        if "potato" in crop or "tomato" in crop:
+            liters_per_ha = 300.0
+            concentration_str = "50g of Ridomil Gold MZ (Metalaxyl-M + Mancozeb) per 20L tank"
+            product = "Metalaxyl-M + Mancozeb (Ridomil Gold MZ 68 WG)"
+            dose_per_tank_grams = 50.0
+            unit = "g"
+        elif "coffee" in crop:
+            liters_per_ha = 200.0
+            concentration_str = "20ml of Cyproconazole (Alto 100 SL) per 20L tank"
+            product = "Cyproconazole 100 SL (Systemic Triazole)"
+            dose_per_tank_grams = 20.0
+            unit = "ml"
+        elif "corn" in crop:
+            liters_per_ha = 200.0
+            concentration_str = "15ml of Azoxystrobin + Difenoconazole per 20L tank"
+            product = "Azoxystrobin + Difenoconazole (Amistar Top)"
+            dose_per_tank_grams = 15.0
+            unit = "ml"
+        else:
+            liters_per_ha = 250.0
+            concentration_str = "40g of Copper Oxychloride 50 WP per 20L tank"
+            product = "Copper Oxychloride 50 WP"
+            dose_per_tank_grams = 40.0
+            unit = "g"
+
+        area_ha = area_sqm / 10000.0
+        total_liters = area_ha * liters_per_ha
+        total_tanks = max(1.0, round(total_liters / tank_capacity, 1))
+        total_product_val = round(total_tanks * dose_per_tank_grams, 1)
+        total_product_str = f"{total_product_val} {unit} total for {area_sqm:,.0f} m²"
+
+        # Severity risk assessment
+        if "CRITICAL" in severity:
+            economic_loss = 75.0
+            rain_interval = 4
+        elif "MODERATE" in severity:
+            economic_loss = 40.0
+            rain_interval = 3
+        else:
+            economic_loss = 15.0
+            rain_interval = 2
+
+        ppe = [
+            "Nitrile chemical-resistant gloves (do not use cloth or leather gloves)",
+            "Respirator mask with activated carbon filter for organic vapors and dusts",
+            "Protective impact and chemical-splash safety goggles",
+            "Waterproof PVC chemical apron over long-sleeve protective field clothes",
+            "Impermeable rubber boots with trousers tucked outside the boot shaft",
+        ]
+
+        tips = [
+            "Calibrate backpack nozzle at 2.5 bar pressure using a hollow-cone nozzle for thorough foliar coverage.",
+            "Apply strictly between 6:00 AM and 9:00 AM when relative humidity is favorable and thermal updrafts are minimal.",
+            "Add an organosilicone surfactant/adherent (10ml per 20L) to improve rainfast adhesion on steep mountain slopes.",
+            "Ensure full coverage of both adaxial (upper) and abaxial (underside) surfaces of the canopy.",
+        ]
+
+        return DosageCalculationResponse(
+            product_recommended=product,
+            concentration_per_20l_backpack=concentration_str,
+            total_tanks_needed=total_tanks,
+            total_product_quantity=total_product_str,
+            rain_safety_interval_hours=rain_interval,
+            estimated_economic_loss_percentage=economic_loss,
+            protective_equipment_ppe=ppe,
+            application_tips=tips,
         )
 
 
