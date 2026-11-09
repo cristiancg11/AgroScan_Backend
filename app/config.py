@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     cors_origins: str = "http://localhost:5173"
+    secret_key: str = "agroscan_super_secret_jwt_key_2026"
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 10080  # 7 days
 
     @property
     def cors_origins_list(self) -> List[str]:
