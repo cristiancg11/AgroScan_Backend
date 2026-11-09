@@ -160,6 +160,18 @@ def health_check(db: Session = Depends(get_db)):
     summary="Register Farmer Account",
     description="Registers a new farmer, hashes the password with bcrypt, persists to Supabase, and issues a JWT.",
 )
+@app.post(
+    "/auth/register",
+    response_model=TokenResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+@app.post(
+    "/api/v1/register",
+    response_model=TokenResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
 def register_farmer(
     payload: UserRegisterRequest,
     db: Session = Depends(get_db),
@@ -167,6 +179,7 @@ def register_farmer(
     """
     Creates a new farmer profile in Supabase PostgreSQL and returns signed JWT access token.
     """
+    print(f"--> [AUTH] Incoming registration payload: {payload}")
     clean_email = payload.email.strip().lower()
 
     # Check for existing user account
@@ -227,6 +240,18 @@ def register_farmer(
     summary="Farmer Authentication Login",
     description="Authenticates farmer credentials against stored bcrypt hash in Supabase and returns a JWT access token.",
 )
+@app.post(
+    "/auth/login",
+    response_model=TokenResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+@app.post(
+    "/api/v1/login",
+    response_model=TokenResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
 def login_farmer(
     payload: UserLoginRequest,
     db: Session = Depends(get_db),
@@ -234,6 +259,7 @@ def login_farmer(
     """
     Validates farmer email and password credentials, returning a signed JWT access token.
     """
+    print(f"--> [AUTH] Incoming login attempt: {payload.email}")
     clean_email = payload.email.strip().lower()
     user = db.query(User).filter(User.email == clean_email).first()
 
@@ -275,6 +301,11 @@ def login_farmer(
     tags=["Authentication"],
     summary="Get Current User Profile",
     description="Returns the profile of the currently authenticated farmer from JWT Bearer token validation.",
+)
+@app.get(
+    "/auth/me",
+    response_model=UserProfileResponse,
+    include_in_schema=False,
 )
 def get_current_user_profile(
     current_user: User = Depends(get_current_user),
