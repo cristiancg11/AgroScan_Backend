@@ -13,11 +13,16 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 class CropType(str, Enum):
     """
     Supported Andean crops grown predominantly in Nariño, Colombia.
+    Expanded to support potatoes, coffee, corn, tomatoes, uchuva, mora de Castilla, peas, and fruit trees.
     """
     POTATO = "Potato"
     COFFEE = "Coffee"
     CORN = "Corn"
     TOMATO = "Tomato"
+    UCHUVA = "Uchuva"
+    MORA = "Mora de Castilla"
+    PEA = "Arveja"
+    FRUIT_TREES = "Frutales"
 
 
 class PathogenType(str, Enum):
@@ -94,6 +99,69 @@ class UserProfileResponse(BaseModel):
 # ============================================================================
 # DIAGNOSTICS SCHEMAS
 # ============================================================================
+
+class ClearDiagnosticResponse(BaseModel):
+    """
+    Ultra-clear, farmer-friendly phytosanitary diagnostic response schema.
+    Structured into 4 direct sections for smallholders in the Andean region:
+    1. ¿Qué tiene la planta? (crop_name, part_analyzed, common_disease_name, scientific_name)
+    2. ¿Qué tan grave es? (severity_level, confidence_percentage, summary_what_happened)
+    3. ¿Qué se debe hacer de inmediato? (immediate_actions)
+    4. Solución recomendada (organic_solution, chemical_solution, dosage_backpack_20l)
+    """
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    id: str = Field(..., description="Unique diagnostic session identifier")
+    crop_name: str = Field(..., description="Identified Andean crop name (Papa, Tomate, Café, etc.)")
+    part_analyzed: str = Field(
+        default="Hoja / Follaje",
+        description="Analyzed plant organ: 'Hoja / Follaje' or 'Fruto / Tubérculo'"
+    )
+    common_disease_name: str = Field(..., description="Common agricultural disease, pest or deficiency name")
+    scientific_name: str = Field(..., description="Latin binomial scientific name of pathogen/pest")
+    severity_level: str = Field(
+        ...,
+        description="Infestation or infection severity classification: 'Baja', 'Moderada', or 'Crítica'"
+    )
+    confidence_percentage: int = Field(
+        ...,
+        ge=0,
+        le=100,
+        description="AI diagnostic confidence percentage (0 to 100)"
+    )
+    summary_what_happened: str = Field(
+        ...,
+        description="Two direct, jargon-free sentences explaining the damage to the farmer"
+    )
+    immediate_actions: List[str] = Field(
+        ...,
+        description="Three concrete, immediate steps to contain the damage (Pasos 1, 2 y 3)"
+    )
+    organic_solution: str = Field(
+        ...,
+        description="Accessible ecological or biological control solution"
+    )
+    chemical_solution: str = Field(
+        ...,
+        description="Targeted chemical active ingredient solution with safety instructions"
+    )
+    dosage_backpack_20l: str = Field(
+        ...,
+        description="Calibrated recipe dosage per standard 20-liter agricultural backpack sprayer"
+    )
+    created_at: str = Field(
+        ...,
+        description="ISO 8601 creation timestamp string"
+    )
+    user_id: Optional[str] = Field(
+        default=None,
+        description="Associated farmer user UUID"
+    )
+    plot_name: Optional[str] = Field(
+        default="Lote Principal",
+        description="Parcel or lot identifier"
+    )
+
 
 class DiagnosticResponse(BaseModel):
     """
