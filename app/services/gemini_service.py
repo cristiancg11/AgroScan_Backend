@@ -6,6 +6,7 @@ diagnostics and interactive field follow-up consultations for Andean cropping sy
 
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -645,3 +646,58 @@ class GeminiAgronomicService:
 
 
 gemini_service = GeminiAgronomicService()
+
+
+def generate_dynamic_agronomic_chat(
+    user_message: str,
+    crop: str = "General",
+    disease_context: str = "Ninguno",
+    history: list = None,
+) -> str:
+    """
+    Directly queries Google Gemini 2.5 Flash to dynamically answer any field agronomic question,
+    including fertilizers, mixtures, dosages per 20L backpack sprayer, symptoms, weather, and general care.
+    Operates without hardcoded keyword rules or mock fallbacks.
+    """
+    if history is None:
+        history = []
+
+    api_key = os.getenv("GEMINI_API_KEY") or (settings.gemini_api_key.strip() if settings.gemini_api_key else "")
+    if not api_key or api_key == "your_gemini_api_key_here":
+        raise ValueError("GEMINI_API_KEY environment variable is not configured.")
+
+    client = genai.Client(api_key=api_key)
+
+    system_instruction = (
+        "Eres un Agrónomo Especialista y Asistente Técnico Oficial de AgroScan AI. "
+        "Tu misión es responder con precisión, empatía y lenguaje práctico cualquier pregunta, "
+        "duda técnica o consulta que te haga el agricultor sobre su cultivo, patologías foliares o de frutos, "
+        "mezclas de agroquímicos y biológicos, dosis por bomba de 20 litros, nutrición vegetal, "
+        "tiempos de carencia, podas o manejo de campo en general. "
+        f"Contexto actual del lote: Cultivo: {crop} | Patología detectada: {disease_context}. "
+        "Responde de forma clara, directa, útil y sin rodeos. "
+        "Tienes libertad total para responder cualquier consulta agronómica que el usuario realice."
+    )
+
+    contents = []
+    for turn in history[-6:]:
+        if isinstance(turn, dict):
+            sender = turn.get("sender") or turn.get("role", "Usuario")
+            text = turn.get("text") or turn.get("content", "")
+            if text:
+                contents.append(f"{sender}: {text}")
+        elif isinstance(turn, str) and turn.strip():
+            contents.append(turn.strip())
+
+    contents.append(f"Usuario: {user_message}")
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents="\n".join(contents),
+        config=types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            temperature=0.7,
+        ),
+    )
+    return response.text.strip()
+
