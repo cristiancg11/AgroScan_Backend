@@ -33,6 +33,9 @@ engine = create_engine(
     get_clean_database_url(settings.database_url),
     pool_pre_ping=True,
     pool_recycle=300,
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
 )
 
 # Thread-local session factory
@@ -44,6 +47,13 @@ SessionLocal = sessionmaker(
 
 # Declarative ORM base
 Base = declarative_base()
+
+
+def init_db_schema():
+    """
+    Ensures all metadata tables and entities are registered in Supabase PostgreSQL.
+    """
+    Base.metadata.create_all(bind=engine)
 
 
 def get_db() -> Generator[Session, None, None]:

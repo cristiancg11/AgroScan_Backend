@@ -59,6 +59,8 @@ async def lifespan(app: FastAPI):
                     "REFERENCES users(id) ON DELETE SET NULL;"
                 )
             )
+            # Explicitly verify and create dosage_assessments table
+            DosageAssessment.__table__.create(bind=conn, checkfirst=True)
             conn.commit()
         logger.info("Supabase PostgreSQL schema verified successfully.")
     except Exception as exc:
