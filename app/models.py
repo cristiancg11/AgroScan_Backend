@@ -1,6 +1,6 @@
 """
 SQLAlchemy ORM models for Supabase PostgreSQL.
-Defines tables for phytosanitary diagnostics and agronomic chat threads.
+Defines tables for users, phytosanitary diagnostics, and agronomic chat threads.
 """
 
 from datetime import datetime, timezone
@@ -24,6 +24,29 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class User(Base):
+    """
+    User model representing registered Andean farmers and agronomists.
+    Stored in the 'users' table in Supabase PostgreSQL.
+    """
+    __tablename__ = "users"
+
+    id = Column(String(64), primary_key=True, index=True)
+    full_name = Column(String(255), nullable=False)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
+    farm_name = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    # One-to-many relationship with diagnostics
+    diagnostics = relationship(
+        "DiagnosticRecord",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        order_by="DiagnosticRecord.timestamp.desc()",
+    )
+
+
 class DiagnosticRecord(Base):
     """
     DiagnosticRecord model representing crop phytosanitary evaluation results.
@@ -32,6 +55,12 @@ class DiagnosticRecord(Base):
     __tablename__ = "diagnostics"
 
     id = Column(String(64), primary_key=True, index=True)
+    user_id = Column(
+        String(64),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     crop_type = Column(String(64), nullable=False)
     plot_name = Column(String(128), nullable=False, index=True)
     disease_name = Column(String(255), nullable=False)
@@ -46,7 +75,8 @@ class DiagnosticRecord(Base):
     disclaimer = Column(String(500), nullable=False, default="")
     timestamp = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
-    # Relationship to conversation turns
+    # Relationships
+    user = relationship("User", back_populates="diagnostics")
     chat_messages = relationship(
         "ChatThreadMessage",
         back_populates="diagnostic",
