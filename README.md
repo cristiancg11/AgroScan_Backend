@@ -38,6 +38,7 @@ Developed specifically for smallholder farming communities in **Nariño, Colombi
 
 ## 2. Key Features
 
+- **JWT Authentication & Farmer Accounts**: Secure registration and login using bcrypt password hashing, issuing signed HS256 JWT tokens to associate diagnostic records and history with specific farmers.
 - **Multimodal Visual Diagnosis**: Direct plant symptom analysis with Google Gemini 2.5 Flash, returning structured phytopathological reports.
 - **Relational Persistence**: Cloud-hosted PostgreSQL managed by **Supabase** via PgBouncer transaction pooling (`port 6543`, `pool_pre_ping=True`, `pool_recycle=300`).
 - **Interactive Follow-Up Consultation**: Grounded agronomic advisory engine calculating calibrated dosages for standard **20-Liter agricultural backpack sprayers** (*bombas de espalda de 20L*), rainfastness thresholds, and required personal protective equipment (PPE).
@@ -47,10 +48,21 @@ Developed specifically for smallholder farming communities in **Nariño, Colombi
 
 ## 3. Database Schema (Supabase PostgreSQL)
 
+### `users` Table
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `id` | `VARCHAR(64)` | Primary Key (UUID format `usr-xxx`) |
+| `full_name` | `VARCHAR(255)` | Farmer or agronomist full name |
+| `email` | `VARCHAR(255)` | Unique, indexed email address |
+| `hashed_password` | `VARCHAR(255)` | One-way salted bcrypt password hash |
+| `farm_name` | `VARCHAR(255)` | Farm parcel or finca designation |
+| `created_at` | `TIMESTAMPTZ` | Registration timestamp (UTC) |
+
 ### `diagnostics` Table
 | Column | Type | Description |
 | :--- | :--- | :--- |
 | `id` | `VARCHAR(64)` | Primary Key (UUID format `diag-xxx`) |
+| `user_id` | `VARCHAR(64)` | Foreign Key -> `users(id)` (ON DELETE SET NULL, Indexed) |
 | `crop_type` | `VARCHAR(64)` | Crop variety (`Potato`, `Coffee`, `Corn`, `Tomato`) |
 | `plot_name` | `VARCHAR(128)` | Farm parcel identifier (Indexed) |
 | `disease_name` | `VARCHAR(255)` | Identified condition or pest |
@@ -82,8 +94,11 @@ Developed specifically for smallholder farming communities in **Nariño, Colombi
 | :--- | :--- | :--- |
 | `GET` | `/` | Root service metadata and API capabilities |
 | `GET` | `/health` | Live health probe testing Supabase connection & Gemini setup |
+| `POST` | `/api/v1/auth/register` | Register new farmer account and issue JWT access token |
+| `POST` | `/api/v1/auth/login` | Authenticate farmer with bcrypt hash and return JWT |
+| `GET` | `/api/v1/auth/me` | Retrieve authenticated farmer profile (`Bearer <token>`) |
 | `POST` | `/api/v1/diagnose` | Upload crop leaf image (`multipart/form-data`) for AI diagnosis |
-| `GET` | `/api/v1/history` | Retrieve historical diagnosis records from Supabase |
+| `GET` | `/api/v1/history` | Retrieve historical diagnosis records (filtered by user if authenticated) |
 | `POST` | `/api/v1/diagnose/{id}/chat` | Interactive agronomic follow-up consultation grounded on diagnosis |
 | `GET` | `/docs` | Interactive Swagger UI API documentation |
 | `GET` | `/redoc` | OpenAPI Redoc documentation |
