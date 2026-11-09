@@ -1,10 +1,11 @@
 """
 AgroScan AI - Andean Crop Phytosanitary Diagnostic & Advisory Engine.
 FastAPI REST API powered by Google Gemini 2.5 Flash Vision, Supabase PostgreSQL (SQLAlchemy + PgBouncer),
-and an interactive agronomic follow-up consultation engine.
+and JWT-authenticated agronomic consultations.
 """
 
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from typing import List, Optional
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
@@ -14,7 +15,8 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import Base, engine, get_db
-from app.models import ChatThreadMessage, DiagnosticRecord
+from app.dependencies import get_current_user, get_current_user_optional
+from app.models import ChatThreadMessage, DiagnosticRecord, User
 from app.schemas import (
     ChatMessage,
     ChatFollowUpRequest,
@@ -22,7 +24,12 @@ from app.schemas import (
     CropType,
     DiagnosticResponse,
     HealthCheckResponse,
+    TokenResponse,
+    UserLoginRequest,
+    UserProfileResponse,
+    UserRegisterRequest,
 )
+from app.security import create_access_token, get_password_hash, verify_password
 from app.services.gemini_service import gemini_service
 
 # Configure application logging
@@ -42,6 +49,15 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("Initializing relational schema in Supabase PostgreSQL...")
         Base.metadata.create_all(bind=engine)
+        # Ensure user_id column exists if table was initialized earlier
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE diagnostics ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) "
+                    "REFERENCES users(id) ON DELETE SET NULL;"
+                )
+            )
+            conn.commit()
         logger.info("Supabase PostgreSQL schema verified successfully.")
     except Exception as exc:
         logger.error("Failed to initialize database tables: %s", exc)
@@ -56,7 +72,7 @@ app = FastAPI(
         "Production-grade phytosanitary diagnostic and parcel management API for Andean smallholders in Nariño, Colombia. "
         "Powered by Google Gemini 2.5 Flash multimodal vision and Supabase PostgreSQL relational persistence."
     ),
-    version="2.0.0",
+    version="2.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
@@ -86,7 +102,7 @@ def root_endpoint():
     """
     return {
         "service": "AgroScan AI - Andean Phytosanitary Engine",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "target_region": "Nariño, Colombia (Andean Highlands)",
         "supported_crops": [c.value for c in CropType],
         "database": "Supabase PostgreSQL (PgBouncer)",
@@ -111,10 +127,125 @@ def health_check(db: Session = Depends(get_db)):
     return HealthCheckResponse(
         status="healthy" if database_ok else "degraded",
         service="AgroScan AI Backend",
-        version="2.0.0",
+        version="2.1.0",
         gemini_configured=gemini_service.is_configured,
         database_connected=database_ok,
     )
+
+
+# ============================================================================
+# AUTHENTICATION ENDPOINTS (Bcrypt + JWT + Supabase PostgreSQL)
+# ============================================================================
+
+@app.post(
+    "/api/v1/auth/register",
+    response_model=TokenResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Authentication"],
+    summary="Register Farmer Account",
+    description="Registers a new farmer, hashes the password with bcrypt, persists to Supabase, and issues a JWT.",
+)
+def register_farmer(
+    payload: UserRegisterRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Creates a new farmer profile in Supabase PostgreSQL and returns signed JWT access token.
+    """
+    clean_email = payload.email.strip().lower()
+
+    # Check for existing user account
+    existing = db.query(User).filter(User.email == clean_email).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An account with this email address is already registered.",
+        )
+
+    # Hash password with bcrypt
+    hashed = get_password_hash(payload.password)
+    user_id = f"usr-{uuid.uuid4().hex[:12]}"
+
+    new_user = User(
+        id=user_id,
+        full_name=payload.full_name.strip(),
+        email=clean_email,
+        hashed_password=hashed,
+        farm_name=payload.farm_name.strip(),
+    )
+
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    logger.info("Registered new farmer user '%s' (%s)", new_user.email, new_user.id)
+
+    # Issue JWT access token
+    access_token = create_access_token(
+        data={"sub": new_user.id, "email": new_user.email}
+    )
+
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user_id=new_user.id,
+        full_name=new_user.full_name,
+        farm_name=new_user.farm_name,
+    )
+
+
+@app.post(
+    "/api/v1/auth/login",
+    response_model=TokenResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["Authentication"],
+    summary="Farmer Authentication Login",
+    description="Authenticates farmer credentials against stored bcrypt hash in Supabase and returns a JWT access token.",
+)
+def login_farmer(
+    payload: UserLoginRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Validates farmer email and password credentials, returning a signed JWT access token.
+    """
+    clean_email = payload.email.strip().lower()
+    user = db.query(User).filter(User.email == clean_email).first()
+
+    if not user or not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password credentials. Please verify your details.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    access_token = create_access_token(
+        data={"sub": user.id, "email": user.email}
+    )
+    logger.info("Authenticated farmer user '%s'", user.email)
+
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user_id=user.id,
+        full_name=user.full_name,
+        farm_name=user.farm_name,
+    )
+
+
+@app.get(
+    "/api/v1/auth/me",
+    response_model=UserProfileResponse,
+    tags=["Authentication"],
+    summary="Get Current User Profile",
+    description="Returns the profile of the currently authenticated farmer from JWT Bearer token validation.",
+)
+def get_current_user_profile(
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Returns the authenticated farmer user profile extracted from the validated JWT token.
+    """
+    return current_user
 
 
 # ============================================================================
@@ -127,18 +258,19 @@ def health_check(db: Session = Depends(get_db)):
     status_code=status.HTTP_201_CREATED,
     tags=["Diagnostics"],
     summary="Diagnose Andean Crop Image",
-    description="Receives crop leaf photo and plot metadata, runs Gemini 2.5 Flash vision, and persists result in Supabase.",
+    description="Receives crop photo and plot metadata, runs Gemini 2.5 Flash, associates with user account, and persists in Supabase.",
 )
 async def diagnose_crop(
     image: UploadFile = File(..., description="Crop leaf, stem, or plant photo (JPEG/PNG/WebP)"),
     crop_type: str = Form(..., description="Crop kind: Potato, Coffee, Corn, or Tomato"),
     plot_name: str = Form("Plot A - Main Lot", description="Farm parcel / lot identifier"),
     notes: Optional[str] = Form(None, description="Optional field observations or symptoms noted by the farmer"),
+    current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
     """
-    Performs visual phytosanitary analysis using Gemini 2.5 Flash, stores the diagnostic
-    record in Supabase PostgreSQL, and returns the complete agronomic assessment.
+    Performs visual phytosanitary analysis using Gemini 2.5 Flash, associates the record
+    with the logged-in farmer account (if present), and stores it in Supabase PostgreSQL.
     """
     # 1. Validate crop type against Andean crop enum
     normalized_crop = None
@@ -187,9 +319,13 @@ async def diagnose_crop(
             notes=notes.strip() if notes else None,
         )
 
+        user_id = current_user.id if current_user else None
+        diagnostic_result.user_id = user_id
+
         # 5. Persist record into Supabase PostgreSQL
         db_record = DiagnosticRecord(
             id=diagnostic_result.id,
+            user_id=user_id,
             crop_type=diagnostic_result.crop_type.value,
             plot_name=diagnostic_result.plot_name,
             disease_name=diagnostic_result.disease_name,
@@ -208,7 +344,11 @@ async def diagnose_crop(
         db.add(db_record)
         db.commit()
         db.refresh(db_record)
-        logger.info("Successfully persisted diagnostic record %s to Supabase PostgreSQL.", db_record.id)
+        logger.info(
+            "Successfully persisted diagnostic record %s (user: %s) to Supabase PostgreSQL.",
+            db_record.id,
+            user_id or "guest",
+        )
 
         return diagnostic_result
 
@@ -229,22 +369,25 @@ async def diagnose_crop(
     response_model=List[DiagnosticResponse],
     tags=["Diagnostics"],
     summary="Retrieve Diagnostic History",
-    description="Fetches previous phytosanitary diagnostics from Supabase PostgreSQL ordered by timestamp desc.",
+    description="Fetches previous phytosanitary diagnostics from Supabase PostgreSQL, filtered by authenticated farmer.",
 )
 def get_diagnostic_history(
     limit: int = 50,
+    current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
     """
-    Queries all diagnostic records stored in Supabase PostgreSQL ordered from newest to oldest.
+    Queries diagnostic records stored in Supabase PostgreSQL ordered from newest to oldest.
+    If authenticated, returns records specifically associated with the logged-in user.
     """
     try:
-        records = (
-            db.query(DiagnosticRecord)
-            .order_by(DiagnosticRecord.timestamp.desc())
-            .limit(limit)
-            .all()
-        )
+        query = db.query(DiagnosticRecord)
+
+        # Filter by logged-in user if available
+        if current_user:
+            query = query.filter(DiagnosticRecord.user_id == current_user.id)
+
+        records = query.order_by(DiagnosticRecord.timestamp.desc()).limit(limit).all()
         return [DiagnosticResponse.model_validate(rec) for rec in records]
     except Exception as exc:
         logger.error("Failed to query diagnostic history from Supabase: %s", exc)
