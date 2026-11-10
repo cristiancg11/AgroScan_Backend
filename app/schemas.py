@@ -296,6 +296,10 @@ class ChatResponseSchema(BaseModel):
     Dynamic live agronomic chat response generated directly by Gemini 2.5 Flash.
     """
     reply: str = Field(..., description="Direct, helpful, practical agronomic advice for the farmer")
+    suggested_followups: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Optional suggested follow-up questions for technical consultation"
+    )
 
 
 class HealthCheckResponse(BaseModel):

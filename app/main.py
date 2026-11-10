@@ -37,6 +37,7 @@ from app.schemas import (
     UserRegisterRequest,
 )
 from app.security import create_access_token, get_password_hash, verify_password
+from app.services import diagnostic_engine, telemetry_service
 from app.services.gemini_service import gemini_service, generate_dynamic_agronomic_chat
 
 # Model alias for flexible diagnostic querying
@@ -83,7 +84,25 @@ async def lifespan(app: FastAPI):
         logger.info("Supabase PostgreSQL schema verified successfully.")
     except Exception as exc:
         logger.error("Failed to initialize database tables: %s", exc)
+
+    # Initialize non-blocking gRPC microservice server
+    grpc_server_instance = None
+    try:
+        from app.grpc_server import start_grpc_server
+
+        grpc_server_instance = start_grpc_server(port=50051)
+        logger.info("gRPC Telemetry & Evaluation Microservice active on port 50051.")
+    except Exception as g_err:
+        logger.warning("Could not launch gRPC microservice server: %s", g_err)
+
     yield
+
+    if grpc_server_instance:
+        try:
+            grpc_server_instance.stop(grace=1.0)
+            logger.info("gRPC Microservice server terminated cleanly.")
+        except Exception:
+            pass
     logger.info("Shutting down AgroScan AI Backend Service...")
 
 
@@ -473,17 +492,18 @@ async def diagnose_crop(
                 detail="Image exceeds maximum allowed size of 15MB.",
             )
 
-        # 4. Execute multimodal analysis with Gemini 2.5 Flash (with resilient fallback)
+        # 4. Execute multimodal analysis delegating to OOP DiagnosticEngine
         try:
-            diagnostic_result = await gemini_service.analyze_crop_health(
+            diag_dict = await diagnostic_engine.analyze_sample(
                 image_bytes=image_bytes,
+                crop=normalized_crop.value,
                 mime_type=content_type,
-                crop_type=normalized_crop,
                 plot_name=plot_name.strip() or "Lote Principal",
                 notes=notes.strip() if notes else None,
             )
+            diagnostic_result = ClearDiagnosticResponse.model_validate(diag_dict)
         except Exception as ai_err:
-            logger.warning("Vision analysis error caught gracefully: %s", ai_err)
+            logger.warning("Diagnostic engine analysis caught gracefully: %s", ai_err)
             diagnostic_result = gemini_service._generate_fallback_diagnosis(
                 f"diag-{uuid.uuid4().hex[:12]}",
                 normalized_crop,
@@ -495,36 +515,17 @@ async def diagnose_crop(
         diagnostic_result.user_id = user_id
         diagnostic_result.plot_name = plot_name.strip() or "Lote Principal"
 
-        # 5. Persist record into Supabase PostgreSQL
+        # 5. Persist record using OOP AgronomicTelemetryService
         try:
-            conf_score = float(diagnostic_result.confidence_percentage / 100.0)
-            db_record = DiagnosticRecord(
-                id=diagnostic_result.id,
+            telemetry_service.record_diagnostic_history(
                 user_id=user_id,
-                crop_type=diagnostic_result.crop_name,
-                part_analyzed=diagnostic_result.part_analyzed,
-                plot_name=diagnostic_result.plot_name,
-                disease_name=diagnostic_result.common_disease_name,
-                scientific_name=diagnostic_result.scientific_name,
-                pathogen_type="FUNGUS",
-                confidence_score=conf_score,
-                severity_level=diagnostic_result.severity_level,
-                symptoms_analysis=diagnostic_result.summary_what_happened,
-                organic_treatment=[diagnostic_result.organic_solution],
-                chemical_treatment=[diagnostic_result.chemical_solution],
-                preventive_actions=diagnostic_result.immediate_actions,
-                dosage_backpack_20l=diagnostic_result.dosage_backpack_20l,
-                disclaimer="AI-assisted phytosanitary diagnostic for agricultural guidance. Verify with a registered agronomist.",
-                timestamp=datetime.now(timezone.utc),
+                payload=diagnostic_result.model_dump(),
+                db=db,
             )
-
-            db.add(db_record)
-            db.commit()
-            db.refresh(db_record)
-            print(f"[DIAGNOSE] Record persisted successfully: {db_record.id}")
+            print(f"[DIAGNOSE] Record persisted successfully: {diagnostic_result.id}")
             logger.info(
                 "Successfully persisted clear diagnostic record %s (user: %s) to Supabase PostgreSQL.",
-                db_record.id,
+                diagnostic_result.id,
                 user_id or "guest",
             )
         except Exception as db_err:
@@ -617,12 +618,21 @@ def chat_diagnostic_endpoint(
 
     history_turns = payload.history or []
 
-    reply_text = generate_dynamic_agronomic_chat(
-        user_message=payload.message,
-        crop=crop,
-        disease_context=disease,
-        history=history_turns,
-    )
+    try:
+        reply_text = generate_dynamic_agronomic_chat(
+            user_message=payload.message,
+            crop=crop,
+            disease_context=disease,
+            history=history_turns,
+        )
+    except ValueError as ve:
+        logger.warning("Dynamic chat fallback due to unconfigured GEMINI_API_KEY: %s", ve)
+        reply_text = (
+            f"Asesoría técnica para {crop} ({disease}): Para la bomba de espalda de 20 litros, "
+            f"calibre la dosis recomendada según el ingrediente activo, asegure condiciones secas de al menos 3 horas "
+            f"antes de la lluvia y utilice equipo de protección completo. "
+            f"(Nota de sistema: configure GEMINI_API_KEY para habilitar razonamiento en tiempo real con Gemini 2.5 Flash)."
+        )
 
     # Persist conversational turns to Supabase if diagnostic exists
     try:
@@ -642,7 +652,13 @@ def chat_diagnostic_endpoint(
     except Exception:
         db.rollback()
 
-    return {"reply": reply_text}
+    suggested = [
+        "¿Cuál es el intervalo de horas sin lluvia recomendado?",
+        "¿Qué equipo de protección personal debo utilizar?",
+        "¿Puedo mezclar este tratamiento con biofertilizante foliar?",
+    ]
+
+    return {"reply": reply_text, "suggested_followups": suggested}
 
 
 @app.post(
@@ -658,13 +674,28 @@ def chat_general_endpoint(payload: ChatRequestSchema):
     """
     history_turns = payload.history or []
 
-    reply_text = generate_dynamic_agronomic_chat(
-        user_message=payload.message,
-        crop=payload.crop or "General",
-        disease_context=payload.disease_context or "General",
-        history=history_turns,
-    )
-    return {"reply": reply_text}
+    try:
+        reply_text = generate_dynamic_agronomic_chat(
+            user_message=payload.message,
+            crop=payload.crop or "General",
+            disease_context=payload.disease_context or "General",
+            history=history_turns,
+        )
+    except ValueError as ve:
+        logger.warning("Dynamic chat fallback due to unconfigured GEMINI_API_KEY: %s", ve)
+        reply_text = (
+            f"Asesoría técnica para {payload.crop or 'cultivo general'}: "
+            f"Para la bomba de espalda de 20 litros, calibre la dosis recomendada y asegure tiempo seco "
+            f"antes de la lluvia. (Configure GEMINI_API_KEY para habilitar respuestas directas con Gemini 2.5 Flash)."
+        )
+
+    suggested = [
+        "¿Cuál es la dosis recomendada por bomba de 20L?",
+        "¿Cómo afecta el clima andino la aplicación?",
+        "¿Qué alternativas orgánicas existen para este problema?",
+    ]
+
+    return {"reply": reply_text, "suggested_followups": suggested}
 
 
 # ============================================================================
@@ -711,12 +742,15 @@ async def calculate_crop_dosage(
     }
 
     try:
-        # 2. Invoke Gemini 2.5 Flash calculation engine
-        dosage_result = await gemini_service.calculate_smart_dosage(
-            diagnostic_data=diagnostic_context,
+        # 2. Invoke calculation delegating to OOP DiagnosticEngine
+        dosage_dict = await diagnostic_engine.calculate_dosage(
             area_sqm=payload.plot_area_sqm,
+            severity=record.severity_level,
+            crop=record.crop_type,
+            disease=record.disease_name,
             tank_capacity=payload.backpack_capacity_liters,
         )
+        dosage_result = DosageCalculationResponse.model_validate(dosage_dict)
 
         # 3. Persist calculation in Supabase PostgreSQL
         assessment_id = f"dose-{uuid.uuid4().hex[:12]}"
@@ -752,6 +786,30 @@ async def calculate_crop_dosage(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Dosage calculation engine error: {str(exc)}",
         )
+
+
+@app.get(
+    "/api/v1/telemetry/microclimate",
+    tags=["Telemetry & Safety"],
+    summary="Evaluate Andean Spraying Microclimate Window",
+    description="Evaluates temperature, humidity, and rainfall probability to determine the optimal agricultural spraying window.",
+)
+def evaluate_microclimate_endpoint(
+    humidity: float = 65.0,
+    rain_probability: float = 20.0,
+):
+    """
+    Evaluates microclimate spraying conditions using AgronomicTelemetryService.
+    """
+    advisory = telemetry_service.evaluate_microclimate_window(
+        humidity=humidity,
+        rain_prob=rain_probability,
+    )
+    return {
+        "humidity": humidity,
+        "rain_probability": rain_probability,
+        "advisory": advisory,
+    }
 
 
 @app.get(

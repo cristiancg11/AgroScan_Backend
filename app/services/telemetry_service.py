@@ -8,7 +8,7 @@ import logging
 from typing import Any, Dict, Optional
 from sqlalchemy.orm import Session
 
-from app.models import DiagnosticRecord, utc_now
+from app.models import DiagnosticRecord, User, utc_now
 
 logger = logging.getLogger("agroscan.telemetry")
 
@@ -66,6 +66,13 @@ class AgronomicTelemetryService:
             if db:
                 existing = db.query(DiagnosticRecord).filter(DiagnosticRecord.id == diag_id).first()
                 if not existing:
+                    # Validate foreign key constraint if user_id was supplied
+                    valid_user_id = None
+                    if user_id:
+                        user_obj = db.query(User).filter(User.id == user_id).first()
+                        if user_obj:
+                            valid_user_id = user_id
+
                     conf_raw = payload.get("confidence_percentage")
                     if conf_raw is not None:
                         conf_score = float(conf_raw) / 100.0 if conf_raw > 1.0 else float(conf_raw)
@@ -94,7 +101,7 @@ class AgronomicTelemetryService:
 
                     new_record = DiagnosticRecord(
                         id=diag_id,
-                        user_id=user_id,
+                        user_id=valid_user_id,
                         crop_type=payload.get("crop_name") or payload.get("crop_type", "General"),
                         part_analyzed=payload.get("part_analyzed", "Hoja / Follaje"),
                         plot_name=payload.get("plot_name", "Main Lot"),

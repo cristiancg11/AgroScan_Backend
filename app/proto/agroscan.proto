@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package agroscan;
+
+// Service definition for high-performance phytosanitary telemetry and evaluation
+service DiagnosticService {
+  rpc EvaluateSample (SampleRequest) returns (SampleResponse);
+  rpc GetHealthStatus (HealthRequest) returns (HealthResponse);
+}
+
+message SampleRequest {
+  bytes image_data = 1;
+  string crop_name = 2;
+  string plot_name = 3;
+  string notes = 4;
+  string user_id = 5;
+}
+
+message SampleResponse {
+  string diagnostic_id = 1;
+  string crop_name = 2;
+  string part_analyzed = 3;
+  string common_disease_name = 4;
+  string scientific_name = 5;
+  string severity_level = 6;
+  int32 confidence_percentage = 7;
+  string summary_what_happened = 8;
+  repeated string immediate_actions = 9;
+  string organic_solution = 10;
+  string chemical_solution = 11;
+  string dosage_backpack_20l = 12;
+  string created_at = 13;
+  bool success = 14;
+  string error_message = 15;
+}
+
+message HealthRequest {
+  string service_name = 1;
+}
+
+message HealthResponse {
+  string status = 1;
+  string version = 2;
+  bool gemini_configured = 3;
+  bool database_connected = 4;
+  int64 timestamp_epoch = 5;
+}
