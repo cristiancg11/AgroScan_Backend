@@ -15,14 +15,19 @@ logger = logging.getLogger("agroscan.db")
 
 def get_clean_database_url(raw_url: str) -> str:
     """
-    Sanitizes database URL for SQLAlchemy and psycopg.
+    Sanitizes database URL for SQLAlchemy and psycopg2.
     Strips surrounding quotes and removes '?pgbouncer=true' (Prisma-specific option not supported by libpq).
+    Ensures postgresql+psycopg2:// scheme is used for stable connectivity across environments.
     """
     cleaned = raw_url.strip().strip('"').strip("'")
     if "?pgbouncer=true" in cleaned:
         cleaned = cleaned.replace("?pgbouncer=true", "")
     elif "&pgbouncer=true" in cleaned:
         cleaned = cleaned.replace("&pgbouncer=true", "")
+
+    if cleaned.startswith("postgresql://"):
+        cleaned = cleaned.replace("postgresql://", "postgresql+psycopg2://", 1)
+
     return cleaned
 
 
